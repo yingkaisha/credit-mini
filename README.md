@@ -8,7 +8,7 @@ This repository is primarily hosted on NSF NCAR HPCs (`casper.ucar.edu` and `der
 
 ```
 mamba env create -f environment.yml
-conda activate credit
+conda activate credit_mini
 pip install .
 ```
 
