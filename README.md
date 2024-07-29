@@ -12,6 +12,14 @@ conda activate credit_mini
 pip install .
 ```
 
+## To Do
+
+### 2024-07-26
+
+* Switch from the current ERA5 training set to the model resolution / level ERA5 from Google.
+* Add more forcing and static inputs.
+* Base class and unit testing.
+
 # Contact
 Yingkai Sha <ksha@ucar.edu>
 
