@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credit"
+authors = [{name = "NCAR Machine Integration and Learning for Earth Systems (MILES)", email = "miles@ucar.edu"}]
+readme = "README.md"
+license = {file = "LICENSE"}
+dynamic = ["version"]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy<2",
+    "pandas",
+    "matplotlib",
+    "cartopy",
+    "scikit-learn",
+    "pyarrow",
+    "pytest",
+    "xarray",
+    "netcdf4",
+    "torch",
+    "torchvision",
+    "wandb",
+    "pyyaml",
+    "cartopy",
+    "dask",
+    "distributed",
+    "dask-jobqueue",
+    "zarr",
+    "einops",
+    "echo-opt",
+    "bridgescaler",
+    "rotary-embedding-torch",
+    "segmentation-models-pytorch",
+    "vector-quantize-pytorch",
+    "haversine",
+    "pvlib",
+    "sphinx",
+    "geocat-comp",
+   ]
+
+[tool.setuptools]
+packages = ["credit", "credit.models", "credit.metadata", "credit.datasets"]
+
+[tool.setuptools.dynamic]
+version = {file = "credit/VERSION"}
