@@ -1,8 +1,9 @@
-save_loc: "/glade/work/$USER/repos/global/miles-credit/results/fuxi_6h/"
+save_loc: "/glade/work/$USER/repos/global/miles-credit/results/wxformer_6h/"
 seed: 1000
 
 data:
 
+data:
     variables: ['U','V','T','Q']
     save_loc: '/glade/campaign/cisl/aiml/wchapman/MLWPS/STAGING/STD_SixHourly_TOTAL_*'
     
@@ -22,8 +23,8 @@ data:
     valid_years: [2014, 2018]
     scaler_type: 'std_new'  
     
-    history_len: 2
-    valid_history_len: 2
+    history_len: 1
+    valid_history_len: 1
     
     forecast_len: 0
     valid_forecast_len: 0
@@ -32,14 +33,13 @@ data:
     lead_time_periods: 6
     skip_periods: null
     static_first: False
-
     
 trainer:
-    mode: fsdp
+    mode: fsdp # none, ddp, fsdp
     type: standard
     train_batch_size: 1
     valid_batch_size: 1
-    batches_per_epoch: 1000 # Set to 0 to use len(dataloader)
+    batches_per_epoch: 1000
     valid_batches_per_epoch: 100
     learning_rate: 5.0e-04
     weight_decay: 1.0e-05
@@ -49,33 +49,42 @@ trainer:
     grad_accum_every: 1
     grad_max_norm: 1.0
     thread_workers: 4
-    valid_thread_workers: 0
+    valid_thread_workers: 4
     stopping_patience: 50
-    teacher_forcing_ratio: 0.5
+    teacher_forcing_ratio: 0.5 #0.9886539666794065
     stop_rollout: 0.9
     skip_validation: False
     load_weights: True
     load_optimizer: True
     use_scheduler: False
+    cpu_offload: True
+    update_learning_rate: True
+    train_one_epoch: False
     scheduler: {'scheduler_type': 'lambda'}
-  
+    
 model:
-    type: "fuxi"
+    type: "crossformer"
     image_height: 640    # Image height (default: 640)
-    patch_height: 4      # Patch height (default: 16)
+    patch_height: 1      # Patch height (default: 2)
     image_width: 1280    # Image width (default: 1280)
-    patch_width: 4       # Patch width (default: 16)
+    patch_width: 1       # Patch width (default: 2)
     levels: 15           # Number of levels (default: 15)
-    frames: 2            # Number of frames (default: 2)
+    frames: 1            # Number of frames (default: 2)
     frame_patch_size: 2  # Frame patch size (default: 2)
-    dim: 1024            # Dimension (default: 1536)
-    num_groups: 32       # Number of groups (default: 32)
     channels: 4          # Channels (default: 4)
     surface_channels: 7  # Surface channels (default: 7)
-    static_channels: 3   #
-    num_heads: 8         # Number of heads (default: 8)
-    window_size: 7       # Window size (default: 7)
-    depth: 16            # Depth of the swin transformer (default: 48)
+    dim: [128, 256, 512, 1024]              # Dimensionality of each layer (default: [64, 128, 256, 512])
+    depth: [2, 2, 8, 2]                    # Depth of each layer (default: [2, 2, 8, 2])
+    global_window_size: [10, 5, 2, 1]      # Global window size for each layer (default: [10, 5, 2, 1])
+    local_window_size: 10                  # Local window size (default: 10)
+    cross_embed_kernel_sizes:             # Kernel sizes for cross-embedding (default: [[4, 8, 16, 32], [2, 4], [2, 4], [2, 4]])
+    - [4, 8, 16, 32]
+    - [2, 4]
+    - [2, 4]
+    - [2, 4]
+    cross_embed_strides: [2, 2, 2, 2]     # Strides for cross-embedding (default: [4, 2, 2, 2])
+    attn_dropout: 0.                      # Dropout probability for attention layers (default: 0.0)
+    ff_dropout: 0.                        # Dropout probability for feed-forward layers (default: 0.0)
     pad_lon: 80
     pad_lat: 80
     use_spectral_norm: True
@@ -83,7 +92,7 @@ model:
 loss: 
     training_loss: "mse"
     use_vgg: False
-    use_power_loss: True # use either power or spectral loss
+    use_power_loss: False # use either power or spectral loss
     use_spectral_loss: False
     spectral_wavenum_init: 20
     spectral_lambda_reg: 0.1 # power loss is order of 1e1 (usually between 1-10)
@@ -159,28 +168,40 @@ visualization:
                    'transparent':False,
                    'format':'png'}
     video_format: 'mp4' # gif, mp4, none
-
+diagnostics:
+    summary_plot_fhs: [1, 20, 60, 120] # what forecast hours to plot as a summary plot
+    use_spectrum_vis: False
+    spectrum_vis:
+        atmos_variables: ["U", "V", "T", "Q"]
+        atmos_levels: [8, 10]
+        single_level_variables: ["SP", "t2m", "Z500"]
+        figsize: () # empty tuple for auto
+    plev_summary_only: True  # pressure level conversion is really slow, use this option to compute pressure level diagnostics only at summary fhs (above), will disable KE metrics output
+    use_KE_diagnostics: True # disable all KE diagnostics including KE metrics
+    ke_vis:
+        use_KE_spectrum_vis: True
+        use_KE_difference_vis: True
 
 pbs: #derecho
     conda: "/glade/work/ksha/miniconda3/envs/credit"
     project: "NAML0001"
-    job_name: "fuxi"
+    job_name: "wxformer"
     walltime: "12:00:00"
     nodes: 8
     ncpus: 64
     ngpus: 4
     mem: '480GB'
     queue: 'main'
-
+    
 # pbs: # casper
-#     conda: "/glade/work/ksha/miniconda3/envs/credit"
-#     project: "NAML0001"
-#     job_name: 'FuXi_Lite'
+#     conda: "/glade/work/schreck/miniconda3/envs/evidential"
+#     job_name: 'latlon'
 #     nodes: 1
-#     ncpus: 16
+#     ncpus: 8
 #     ngpus: 1
 #     mem: '128GB'
-#     walltime: '24:00:00'
+#     walltime: '12:00:00'
 #     gpu_type: 'a100'
 #     cpu_type: 'milan'
+#     project: 'NAML0001'
 #     queue: 'casper'
