@@ -1,44 +1,51 @@
 name: credit
 channels:
-  - pytorch
-  - nvidia
-  - pyg
   - conda-forge
 
 dependencies:
-  - python=3.11
+  - python=3.12
   - pip
-  - numpy<1.24
+  - jupyter
+  - numpy
   - pandas
-  - matplotlib
-  - cartopy
-  - scikit-learn
   - pyarrow
+  - pyyaml
+  - distributed
+
+## dev and ML ops
   - pytest
+  - ruff
+  - pre_commit
+  - myst-parser
+
+## Earth sciences and visualization
   - xarray
   - netcdf4
-  - pytorch
-  - pytorch-cuda=12.1
-  - torchvision
-  - wandb
-  - pyyaml
-  - cartopy
-  - dask
-  - distributed
-  - dask-jobqueue
   - zarr
-  - jupyter
-  - pyg
   - xesmf
+  - dask
+  - dask-jobqueue
+  - matplotlib
+  - cartopy
+  - ffmpeg
+
+## ML
+  - scikit-learn
+
   - pip:
+    - mpi4py
     - einops
     - echo-opt
+    - optuna==3.6.0
     - bridgescaler
-    - rotary-embedding-torch
-    - segmentation-models-pytorch
-    - vector_quantize_pytorch
+    - torch 
+    - torchvision 
+    - segmentation-models-pytorch>=0.3.4
+    - torch-harmonics
+    - torch_geometric
     - haversine
-    - timm>=0.9.12
     - torchsummary
+    - sphinx-autoapi
+    - properscoring
     - .
 
