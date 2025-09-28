@@ -1,4 +1,5 @@
 import os
+import shutil
 import torch
 import torch.nn as nn
 import logging
@@ -20,22 +21,56 @@ from torch.utils._pytree import tree_map
 
 # utils
 
+
+def load_state_dict_error_handler(load_msg):
+    if load_msg[1]:
+        raise RuntimeError(str(load_msg))
+    elif load_msg[0]:
+        logging.warning(f"Loaded partial model {load_msg}")
+    else:  # all keys matched
+        logging.info(load_msg)
+
+
+def get_file_extension(file_path):
+    _, ext = os.path.splitext(file_path)
+    return ext
+
+
+def copy_checkpoint(checkpoint_file_path: str, number) -> None:
+    """
+    Copy every checkpoint afterit's saved.
+
+    Args:
+        state_dict (dict): state dict.
+        checkpoint_file_path (str): path to the checkpoint file.
+        use_safetensors (bool): whether to use safetensors to save the checkpoint.
+    """
+
+    exty = get_file_extension(checkpoint_file_path)
+
+    checkpoint_file_path_new = f"{checkpoint_file_path}{number:05}{exty}"
+
+    shutil.copy(checkpoint_file_path, checkpoint_file_path_new)
+
+
 def load_model_state(conf, model, device):
-    save_loc = os.path.expandvars(conf['save_loc'])
+    save_loc = os.path.expandvars(conf["save_loc"])
     #  Load an optimizer, gradient scaler, and learning rate scheduler, the optimizer must come after wrapping model using FSDP
-    ckpt = os.path.join(save_loc, "checkpoint.pt")
-    checkpoint = torch.load(ckpt, map_location=device)
     if conf["trainer"]["mode"] == "fsdp":
         logging.info(f"Loading FSDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
         checkpoint_io = TorchFSDPCheckpointIO()
         checkpoint_io.load_unsharded_model(model, os.path.join(save_loc, "model_checkpoint.pt"))
     else:
+        ckpt = os.path.join(save_loc, "checkpoint.pt")
+        checkpoint = torch.load(ckpt, map_location=device)
         if conf["trainer"]["mode"] == "ddp":
             logging.info(f"Loading DDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
-            model.module.load_state_dict(checkpoint["model_state_dict"])
+            load_msg = model.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            load_state_dict_error_handler(load_msg)
         else:
             logging.info(f"Loading model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
-            model.load_state_dict(checkpoint["model_state_dict"])
+            load_msg = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            load_state_dict_error_handler(load_msg)
     return model
 
 
@@ -53,9 +88,7 @@ def save_state_dict(state_dict: dict, checkpoint_file_path: str, use_safetensors
 
     if use_safetensors:
         assert is_safetensors_available(), "safetensors is not available."
-        assert checkpoint_file_path.endswith(
-            ".safetensors"
-        ), "safetensors only supports .safetensors suffix for checkpoint file."
+        assert checkpoint_file_path.endswith(".safetensors"), "safetensors only supports .safetensors suffix for checkpoint file."
         from safetensors.torch import save_file as safe_save_file
 
         safe_save_file(state_dict_cpu, checkpoint_file_path, metadata={"format": "pt"})
@@ -79,9 +112,7 @@ def load_state_dict(checkpoint_file_path: Path):
     ), f"Cannot load state dict from dtensor checkpoint {checkpoint_file_path}, you should convert the distributed tensors to gathered tensors with our CLI offline."
 
     if is_safetensor_checkpoint(checkpoint_file_path):
-        assert (
-            is_safetensors_available()
-        ), f"Cannot load state dict from safetensor checkpoint {checkpoint_file_path}, because safetensors is not available. Please install safetensors first with pip install safetensors."
+        assert is_safetensors_available(), f"Cannot load state dict from safetensor checkpoint {checkpoint_file_path}, because safetensors is not available. Please install safetensors first with pip install safetensors."
         # load with safetensors
         from safetensors import safe_open
 
@@ -148,7 +179,8 @@ class TorchFSDPCheckpointIO:
     def load_unsharded_model(self, model, checkpoint):
         model = model.unwrap()
         checkpoint = load_state_dict(checkpoint)
-        model.load_state_dict(checkpoint)
+        load_msg = model.load_state_dict(checkpoint, strict=False)
+        load_state_dict_error_handler(load_msg)
 
     def load_unsharded_optimizer(self, optimizer, checkpoint):
         checkpoint = load_state_dict(checkpoint)
@@ -156,7 +188,7 @@ class TorchFSDPCheckpointIO:
         # I believe using scatter causes extra memory usage by torch, which has caused OOM problems. shard should not do this -- John
         # see https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.FullyShardedDataParallel.shard_full_optim_state_dict
         sharded_osd = FSDP.shard_full_optim_state_dict(checkpoint, fsdp_model)
-        #sharded_osd = FSDP.scatter_full_optim_state_dict(checkpoint, fsdp_model)
+        # sharded_osd = FSDP.scatter_full_optim_state_dict(checkpoint, fsdp_model)
         optimizer.load_state_dict(sharded_osd)
 
     def save_unsharded_model(self, model, checkpoint, gather_dtensor, use_safetensors, rank):
@@ -168,7 +200,11 @@ class TorchFSDPCheckpointIO:
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
             full_model_state = model.state_dict()
         if rank == 0:
-            save_state_dict(full_model_state, checkpoint_file_path=checkpoint, use_safetensors=use_safetensors)
+            save_state_dict(
+                full_model_state,
+                checkpoint_file_path=checkpoint,
+                use_safetensors=use_safetensors,
+            )
 
     def save_unsharded_optimizer(self, optimizer, checkpoint, gather_dtensor, rank):
         """
@@ -177,7 +213,11 @@ class TorchFSDPCheckpointIO:
         fsdp_model = optimizer.unwrap_model()
         full_optimizer_state = FSDP.full_optim_state_dict(fsdp_model, optim=optimizer, rank0_only=True)
         if rank == 0:
-            save_state_dict(full_optimizer_state, checkpoint_file_path=checkpoint, use_safetensors=False)
+            save_state_dict(
+                full_optimizer_state,
+                checkpoint_file_path=checkpoint,
+                use_safetensors=False,
+            )
 
 
 class ModelWrapper(nn.Module):
@@ -213,15 +253,27 @@ class TorchFSDPModel(ModelWrapper):
         return self.module
 
     def concat_and_reshape(self, x1, x2):  # to be removed when data is updated
-        x1 = x1.view(x1.shape[0], x1.shape[1], x1.shape[2] * x1.shape[3], x1.shape[4], x1.shape[5])
+        x1 = x1.view(
+            x1.shape[0],
+            x1.shape[1],
+            x1.shape[2] * x1.shape[3],
+            x1.shape[4],
+            x1.shape[5],
+        )
         x_concat = torch.cat((x1, x2), dim=2)
         return x_concat.permute(0, 2, 1, 3, 4)
 
     def reshape_only(self, x1):
-        '''
+        """
         As in "concat_and_reshape", but for upper-air variables only.
-        '''
-        x1 = x1.view(x1.shape[0], x1.shape[1], x1.shape[2] * x1.shape[3], x1.shape[4], x1.shape[5])
+        """
+        x1 = x1.view(
+            x1.shape[0],
+            x1.shape[1],
+            x1.shape[2] * x1.shape[3],
+            x1.shape[4],
+            x1.shape[5],
+        )
         return x1.permute(0, 2, 1, 3, 4)
 
 
@@ -296,7 +348,7 @@ class OptimizerWrapper:
             clip_value (float or int): maximum allowed value of the gradients. Gradients are clipped in the range
 
         Note:
-            In PyTorch Torch 2.0 and above, you can pass in foreach=True as kwargs to clip_grad_value_ to use the
+            In PyTorch 2.0 and above, you can pass in foreach=True as kwargs to `clip_grad_value_` to use the
             faster implementation. Please refer to the PyTorch documentation for more details.
         """
         nn.utils.clip_grad_value_(self.parameters, clip_value, *args, **kwargs)
@@ -318,7 +370,7 @@ class OptimizerWrapper:
             error_if_nonfinite (bool): if True, an error is raised if the total norm is non-finite. Default: False
 
         Note:
-            In PyTorch Torch 2.0 and above, you can pass in foreach=True as kwargs to clip_grad_norm_ to use the
+            In PyTorch 2.0 and above, you can pass in foreach=True as kwargs to `clip_grad_norm_` to use the
             faster implementation. Please refer to the PyTorch documentation for more details.
         """
         norm = nn.utils.clip_grad_norm_(self.parameters, max_norm, norm_type, error_if_nonfinite, *args, **kwargs)
@@ -333,9 +385,7 @@ class OptimizerWrapper:
         Args:
             loss (Tensor): The loss to be scaled.
         """
-        raise NotImplementedError(
-            "The method scale_loss is only available for optimizers with mixed precision training"
-        )
+        raise NotImplementedError("The method scale_loss is only available for optimizers with mixed precision training")
 
     def unscale_grad(self):
         """
@@ -343,9 +393,7 @@ class OptimizerWrapper:
 
         Note: Only available for optimizers with mixed precision training.
         """
-        raise NotImplementedError(
-            "The method unscale_grad is only available for optimizers with mixed precision training"
-        )
+        raise NotImplementedError("The method unscale_grad is only available for optimizers with mixed precision training")
 
     def unwrap(self):
         """
@@ -368,16 +416,12 @@ if __name__ == "__main__":
     import torch.nn as nn
     import torch.distributed as dist
 
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = "29500"
     dist.init_process_group("nccl", rank=0, world_size=1)
 
     # Define your model, optimizer, and loss function
-    model = nn.Sequential(
-        nn.Linear(10, 5),
-        nn.ReLU(),
-        nn.Linear(5, 2)
-    ).to("cuda")
+    model = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 2)).to("cuda")
 
     # Boost the model and optimizer with FSDP
     fsdp_model = TorchFSDPModel(model)
@@ -395,11 +439,7 @@ if __name__ == "__main__":
     checkpoint_io.save_unsharded_optimizer(fsdp_optimizer, "optimizer_checkpoint.pth", gather_dtensor=True)
 
     # Load the model and optimizer
-    loaded_model = nn.Sequential(
-        nn.Linear(10, 5),
-        nn.ReLU(),
-        nn.Linear(5, 2)
-    ).to("cuda")
+    loaded_model = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 2)).to("cuda")
 
     fsdp_loaded_model = TorchFSDPModel(loaded_model)
 
@@ -411,10 +451,6 @@ if __name__ == "__main__":
 
     # Load the model outside of FSDP context
 
-    indy_model = nn.Sequential(
-        nn.Linear(10, 5),
-        nn.ReLU(),
-        nn.Linear(5, 2)
-    ).to("cuda")
+    indy_model = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 2)).to("cuda")
     checkpoint = torch.load("model_checkpoint.pth")
     indy_model.load_state_dict(checkpoint)

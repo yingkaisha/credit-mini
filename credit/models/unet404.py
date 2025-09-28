@@ -1,10 +1,9 @@
 import segmentation_models_pytorch as smp
+import torch
 import logging
 import copy
 import os
 import torch.nn.functional as F
-from credit.models.base_model import BaseModel
-from credit.postblock import PostBlock
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
@@ -151,78 +150,26 @@ def load_premade_encoder_model(model_conf):
         raise OSError(f"Model name {name} not recognized. Please choose from {supported_models.keys()}")
 
 
-class SegmentationModel(BaseModel):
-    def __init__(
-        self,
-        image_height=640,
-        image_width=1280,
-        frames=2,
-        channels=4,
-        surface_channels=7,
-        input_only_channels=3,
-        output_only_channels=0,
-        levels=16,
-        rk4_integration=False,
-        architecture=None,
-        post_conf=None,
-        **kwargs,
-    ):
-        if post_conf is None:
-            post_conf = {"activate": False, "use_skebs": False}
-        super(SegmentationModel, self).__init__()
+class SegmentationModel404(torch.nn.Module):
+    def __init__(self, conf):
+        super(SegmentationModel404, self).__init__()
 
-        self.image_height = image_height
-        self.image_width = image_width
-        self.frames = frames
-        self.channels = channels
-        self.surface_channels = surface_channels
-        self.levels = levels
-        self.rk4_integration = rk4_integration
+        self.variables = conf["data"]["variables"]
+        self.frames = conf["model"]["frames"]
+        self.static_variables = conf["data"]["static_variables"] if "static_variables" in conf["data"] else []
 
-        # input channels
-        input_channels = channels * levels + surface_channels + input_only_channels
+        in_channels = len(self.variables) + len(self.static_variables)
+        out_channels = len(self.variables)
 
-        # output channels
-        output_channels = channels * levels + surface_channels + output_only_channels
+        if conf["model"]["architecture"]["name"] == "unet":
+            conf["model"]["architecture"]["decoder_attention_type"] = "scse"
+        conf["model"]["architecture"]["in_channels"] = in_channels
+        conf["model"]["architecture"]["classes"] = out_channels
 
-        if architecture["name"] == "unet":
-            architecture["decoder_attention_type"] = "scse"
-        architecture["in_channels"] = input_channels
-        architecture["classes"] = output_channels
-
-        self.model = load_premade_encoder_model(architecture)
-        # Additional layers for testing
-
-        self.use_post_block = post_conf["activate"]
-        if self.use_post_block:
-            self.postblock = PostBlock(post_conf)
+        self.model = load_premade_encoder_model(conf["model"]["architecture"])
 
     def forward(self, x):
-        x_copy = None
-        if self.use_post_block:  # copy tensor to feed into postBlock later
-            x_copy = x.clone().detach()
-
         x = F.avg_pool3d(x, kernel_size=(2, 1, 1)) if x.shape[2] > 1 else x
         x = x.squeeze(2)  # squeeze time dim
-        x = self.rk4(x) if self.rk4_integration else self.model(x)
-
-        x = x.unsqueeze(2)
-
-        if self.use_post_block:
-            x = {
-                "y_pred": x,
-                "x": x_copy,
-            }
-            x = self.postblock(x)
-        return x
-
-    def rk4(self, x):
-        def integrate_step(x, k, factor):
-            return self.model(x + k * factor)
-
-        k1 = self.model(x)
-        k2 = integrate_step(x, k1, 0.5)
-        k3 = integrate_step(x, k2, 0.5)
-        k4 = integrate_step(x, k3, 1.0)
-
-        return (k1 + 2 * k2 + 2 * k3 + k4) / 6
+        x = self.model(x)
+        return x.unsqueeze(2)

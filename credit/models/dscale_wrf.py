@@ -285,7 +285,7 @@ class UTransformer(nn.Module):
         return x
 
 
-class Fuxi(BaseModel):
+class Dscale_Tansformer(BaseModel):
     """
     Args:
         img_size (Sequence[int], optional): T, Lat, Lon.
@@ -301,18 +301,16 @@ class Fuxi(BaseModel):
     def __init__(
         self,
         image_height=640,  # 640
-        patch_height=16,
         image_width=1280,  # 1280
+        patch_height=16,
         patch_width=16,
-        levels=15,
+        total_input_channels=50,
+        total_target_channels=80,
+        time_encode_dim=4,
         frames=2,
         frame_patch_size=2,
         dim=1536,
         num_groups=32,
-        channels=4,
-        surface_channels=7,
-        input_only_channels=0,
-        output_only_channels=0,
         num_heads=8,
         depth=48,
         window_size=7,
@@ -358,8 +356,8 @@ class Fuxi(BaseModel):
         # number of channels = levels * varibales per level + surface variables
         # in_chans = out_chans = levels * channels + surface_channels
 
-        in_chans = channels * levels + surface_channels + input_only_channels
-        out_chans = channels * levels + surface_channels + output_only_channels
+        in_chans = total_input_channels
+        out_chans = total_target_channels
 
         # input resolution = number of embedded patches / 2
         # divide by two because "u_trasnformer" has a down-sampling block
@@ -396,10 +394,6 @@ class Fuxi(BaseModel):
         self.out_chans = out_chans
         self.img_size = img_size
 
-        self.channels = channels
-        self.surface_channels = surface_channels
-        self.levels = levels
-
         if self.use_padding:
             self.padding_opt = TensorPadding(**padding_conf)
 
@@ -414,7 +408,12 @@ class Fuxi(BaseModel):
         if self.use_post_block:
             self.postblock = PostBlock(post_conf)
 
-    def forward(self, x: torch.Tensor):
+        self.total_dim = dim
+        self.time_encode = time_encode_dim
+        self.film = nn.Linear(self.time_encode, 2 * (self.total_dim))
+
+    def forward(self, x: torch.Tensor, x_extra: torch.Tensor):
+        #
         # copy tensor to feed into postblock later
         x_copy = None
         if self.use_post_block:
@@ -438,6 +437,13 @@ class Fuxi(BaseModel):
         # x: input size = (Batch, Variables, Time, Lat grids, Lon grids)
         x = self.cube_embedding(x).squeeze(2)  # B C Lat Lon
         # x: output size = (Batch, Embedded dimension, time, number of patches, number of patches)
+
+        # Feature‑wise Linear Modulation
+        alpha_beta = self.film(x_extra)  # [batch, 2*dim]
+        alpha, beta = alpha_beta.chunk(2, dim=1)  # each is [batch, dim]
+        alpha = alpha.view(B, self.total_dim, 1, 1)  # [batch, dim, 1, 1]
+        beta = beta.view(B, self.total_dim, 1, 1)  # [batch, dim, 1, 1]
+        x = alpha * x + beta
 
         # u_transformer stage
         # the size of x does notchange

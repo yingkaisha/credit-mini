@@ -211,18 +211,7 @@ class UTransformer(nn.Module):
         depth (int): Number of blocks.
     """
 
-    def __init__(
-        self,
-        embed_dim,
-        num_groups,
-        input_resolution,
-        num_heads,
-        window_size,
-        depth,
-        proj_drop,
-        attn_drop,
-        drop_path,
-    ):
+    def __init__(self, embed_dim, num_groups, input_resolution, num_heads, window_size, depth, drop_path):
         super().__init__()
         num_groups = to_2tuple(num_groups)
         window_size = to_2tuple(window_size)  # convert window_size[int] to tuple
@@ -243,15 +232,7 @@ class UTransformer(nn.Module):
 
         # SwinT block
         self.layer = SwinTransformerV2Stage(
-            embed_dim,
-            embed_dim,
-            input_resolution,
-            depth,
-            num_heads,
-            window_size[0],
-            proj_drop=proj_drop,
-            attn_drop=attn_drop,
-            drop_path=drop_path,
+            embed_dim, embed_dim, input_resolution, depth, num_heads, window_size[0], drop_path=drop_path
         )  # <--- window_size[0] get window_size[int] from tuple
 
         # up-sampling block
@@ -260,6 +241,7 @@ class UTransformer(nn.Module):
     def forward(self, x):
         B, C, Lat, Lon = x.shape
         padding_left, padding_right, padding_top, padding_bottom = self.padding
+
         x = self.down(x)
         shortcut = x
 
@@ -285,7 +267,7 @@ class UTransformer(nn.Module):
         return x
 
 
-class Fuxi(BaseModel):
+class WRF_Tansformer(BaseModel):
     """
     Args:
         img_size (Sequence[int], optional): T, Lat, Lon.
@@ -300,32 +282,45 @@ class Fuxi(BaseModel):
 
     def __init__(
         self,
-        image_height=640,  # 640
-        patch_height=16,
-        image_width=1280,  # 1280
-        patch_width=16,
-        levels=15,
-        frames=2,
-        frame_patch_size=2,
-        dim=1536,
+        param_interior,
+        param_outside,
+        time_encode_dim=12,
         num_groups=32,
-        channels=4,
-        surface_channels=7,
-        input_only_channels=0,
-        output_only_channels=0,
         num_heads=8,
         depth=48,
         window_size=7,
         use_spectral_norm=True,
         interp=True,
-        proj_drop=0,
-        attn_drop=0,
         drop_path=0,
         padding_conf=None,
         post_conf=None,
         **kwargs,
     ):
         super().__init__()
+        self.time_encode = time_encode_dim
+        image_height_inside = param_interior["image_height"]
+        patch_height_inside = param_interior["patch_height"]
+        image_width_inside = param_interior["image_width"]
+        patch_width_inside = param_interior["patch_width"]
+        levels_inside = param_interior["levels"]
+        frames_inside = param_interior["frames"]
+        frame_patch_size_inside = param_interior["frame_patch_size"]
+        channels_inside = param_interior["channels"]
+        surface_channels_inside = param_interior["surface_channels"]
+        input_only_channels_inside = param_interior["input_only_channels"]
+        output_only_channels_inside = param_interior["output_only_channels"]
+        dim_inside = param_interior["dim"]
+
+        image_height_outside = param_outside["image_height"]
+        patch_height_outside = param_outside["patch_height"]
+        image_width_outside = param_outside["image_width"]
+        patch_width_outside = param_outside["patch_width"]
+        levels_outside = param_outside["levels"]
+        frames_outside = param_outside["frames"]
+        frame_patch_size_outside = param_outside["frame_patch_size"]
+        channels_outside = param_outside["channels"]
+        surface_channels_outside = param_outside["surface_channels"]
+        dim_outside = param_outside["dim"]
 
         self.use_interp = interp
         self.use_spectral_norm = use_spectral_norm
@@ -344,77 +339,90 @@ class Fuxi(BaseModel):
         if self.use_padding:
             pad_lat = padding_conf["pad_lat"]
             pad_lon = padding_conf["pad_lon"]
-            image_height_pad = image_height + pad_lat[0] + pad_lat[1]
-            image_width_pad = image_width + pad_lon[0] + pad_lon[1]
-            img_size = (frames, image_height_pad, image_width_pad)
-            self.img_size_original = (frames, image_height, image_width)
+            image_height_pad = image_height_inside + pad_lat[0] + pad_lat[1]
+            image_width_pad = image_width_inside + pad_lon[0] + pad_lon[1]
+
+            img_size_inside = (frames_inside, image_height_pad, image_width_pad)
+            self.img_size_original = (frames_inside, image_height_inside, image_width_inside)
         else:
-            img_size = (frames, image_height, image_width)
-            self.img_size_original = img_size
+            img_size_inside = (frames_inside, image_height_inside, image_width_inside)
+            self.img_size_original = img_size_inside
+
+        img_size_outside = (frames_outside, image_height_outside, image_width_outside)
 
         # the size of embedded patches
-        patch_size = (frame_patch_size, patch_height, patch_width)
+        patch_size_inside = (frame_patch_size_inside, patch_height_inside, patch_width_inside)
+        patch_size_outside = (frame_patch_size_outside, patch_height_outside, patch_width_outside)
 
         # number of channels = levels * varibales per level + surface variables
         # in_chans = out_chans = levels * channels + surface_channels
 
-        in_chans = channels * levels + surface_channels + input_only_channels
-        out_chans = channels * levels + surface_channels + output_only_channels
+        in_chans_inside = channels_inside * levels_inside + surface_channels_inside + input_only_channels_inside
+        out_chans_inside = channels_inside * levels_inside + surface_channels_inside + output_only_channels_inside
+
+        in_chans_outside = channels_outside * levels_outside + surface_channels_outside
 
         # input resolution = number of embedded patches / 2
         # divide by two because "u_trasnformer" has a down-sampling block
 
-        input_resolution = (
-            round(img_size[1] / patch_size[1] / 2),
-            round(img_size[2] / patch_size[2] / 2),
+        input_resolution_inside = (
+            round(img_size_inside[1] / patch_size_inside[1] / 2),
+            round(img_size_inside[2] / patch_size_inside[2] / 2),
         )
+
+        input_resolution_outside = (
+            round(img_size_outside[1] / patch_size_outside[1] / 2),
+            round(img_size_outside[2] / patch_size_outside[2] / 2),
+        )
+
         # FuXi cube embedding layer
-        self.cube_embedding = CubeEmbedding(img_size, patch_size, in_chans, dim)
+        self.cube_embedding_inside = CubeEmbedding(img_size_inside, patch_size_inside, in_chans_inside, dim_inside)
+        self.cube_embedding_outside = CubeEmbedding(img_size_outside, patch_size_outside, in_chans_outside, dim_outside)
+        self.total_dim = dim_inside  # + dim_outside
 
         # Downsampling --> SwinTransformerV2 stacks --> Upsampling
-        logger.info(f"Define UTransforme with proj_drop={proj_drop}, attn_drop={attn_drop}, drop_path={drop_path}")
-
-        self.u_transformer = UTransformer(
-            dim,
-            num_groups,
-            input_resolution,
-            num_heads,
-            window_size,
-            depth=depth,
-            proj_drop=proj_drop,
-            attn_drop=attn_drop,
-            drop_path=drop_path,
-        )
+        self.u_transformer = UTransformer(self.total_dim, num_groups, input_resolution_inside, num_heads, window_size, depth=depth, drop_path=drop_path)
 
         # dense layer applied on channel dmension
         # channel * patch_size beucase dense layer recovers embedded dimensions to the input dimensions
-        self.fc = nn.Linear(dim, out_chans * patch_size[1] * patch_size[2])
+        self.fc = nn.Linear(self.total_dim, out_chans_inside * patch_size_inside[1] * patch_size_inside[2])
 
         # Hyperparameters
-        self.patch_size = patch_size
-        self.input_resolution = input_resolution
-        self.out_chans = out_chans
-        self.img_size = img_size
+        self.patch_size = patch_size_inside
+        self.input_resolution = input_resolution_inside
+        self.out_chans = out_chans_inside
+        self.img_size = img_size_inside
 
-        self.channels = channels
-        self.surface_channels = surface_channels
-        self.levels = levels
+        # self.channels = channels_inside
+        # self.surface_channels = surface_channels_inside
+        # self.levels = levels
 
         if self.use_padding:
             self.padding_opt = TensorPadding(**padding_conf)
 
-        # Move the model to the device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.to(device)
-
         if self.use_spectral_norm:
             logger.info("Adding spectral norm to all conv and linear layers")
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # Move the model to the device
+            self.to(device)
             apply_spectral_norm(self)
 
         if self.use_post_block:
             self.postblock = PostBlock(post_conf)
 
-    def forward(self, x: torch.Tensor):
+        self.film = nn.Linear(self.time_encode, 2 * (self.total_dim))
+
+    def _match_spatial(self, src: torch.Tensor, ref: torch.Tensor):
+        # if src.shape[-2:] != ref.shape[-2:]:
+        return F.interpolate(src, size=ref.shape[-2:], mode="bilinear", align_corners=False)
+        # return src
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_outside: torch.Tensor,
+        x_extra: torch.Tensor,
+    ):
         # copy tensor to feed into postblock later
         x_copy = None
         if self.use_post_block:
@@ -436,11 +444,23 @@ class Fuxi(BaseModel):
         # (the model produce single forecast lead time only)
 
         # x: input size = (Batch, Variables, Time, Lat grids, Lon grids)
-        x = self.cube_embedding(x).squeeze(2)  # B C Lat Lon
         # x: output size = (Batch, Embedded dimension, time, number of patches, number of patches)
+        x = self.cube_embedding_inside(x).squeeze(2)  # B C Lat Lon
+
+        x_outside = self.cube_embedding_outside(x_outside).squeeze(2)  # B C Lat Lon
+        # x_outside = self._match_spatial(x_outside, x)
+
+        # Feature‑wise Linear Modulation
+        alpha_beta = self.film(x_extra)  # [batch, 2*dim]
+        alpha, beta = alpha_beta.chunk(2, dim=1)  # each is [batch, dim]
+        alpha = alpha.view(B, self.total_dim, 1, 1)  # [batch, dim, 1, 1]
+        beta = beta.view(B, self.total_dim, 1, 1)  # [batch, dim, 1, 1]
+        x_outside = alpha * x_outside + beta
+
+        # x = torch.cat((x, x_outside), 1)
+        x = x + x_outside
 
         # u_transformer stage
-        # the size of x does notchange
         x = self.u_transformer(x)
 
         # recover embeddings to lat/lon grids with dense layer and reshape operation.
@@ -467,68 +487,3 @@ class Fuxi(BaseModel):
             x = self.postblock(x)
 
         return x
-
-
-if __name__ == "__main__":
-    # ============================================================= #
-    # hyperparam examples
-    image_height = 640  # Image height (default: 640)
-    patch_height = 4  # Patch height (default: 16)
-    image_width = 1280  # Image width (default: 1280)
-    patch_width = 4  # Patch width (default: 16)
-    levels = 15  # Number of levels (default: 15)
-    frames = 2  # Number of frames (default: 2)
-    frame_patch_size = 2  # Frame patch size (default: 2)
-    dim = 1024  # Dimension (default: 1536)
-    num_groups = 32  # Number of groups (default: 32)
-    channels = 4  # Channels (default: 4)
-    surface_channels = 7  # Surface channels (default: 7)
-    input_only_channels = 2
-    output_only_channels = 0
-    num_heads = 8  # Number of heads (default: 8)
-    window_size = 7  # Window size (default: 7)
-    depth = 8  # Depth of the swin transformer (default: 48)
-    use_spectral_norm = True
-
-    # ============================================================= #
-    # build the model
-    img_size = (frames, image_height, image_width)
-    patch_size = (frames, patch_height, patch_width)
-
-    model = Fuxi(
-        channels=channels,
-        surface_channels=surface_channels,
-        input_only_channels=input_only_channels,
-        output_only_channels=output_only_channels,
-        levels=levels,
-        image_height=image_height,
-        image_width=image_width,
-        frames=frames,
-        patch_height=patch_height,
-        patch_width=patch_width,
-        frame_patch_size=frame_patch_size,
-        dim=dim,
-        use_spectral_norm=use_spectral_norm,
-        post_conf={"use_skebs": False},
-    ).to("cuda")
-
-    # ============================================================= #
-    # test the model
-
-    # pass an input tensor to test the graph
-    input_tensor = torch.randn(
-        2,
-        channels * levels + surface_channels + input_only_channels,
-        frames,
-        image_height,
-        image_width,
-    ).to("cuda")
-
-    y_pred = model(input_tensor.to("cuda"))
-
-    print("Input shape: {}".format(input_tensor.shape))
-    print("Predicted shape: {}".format(y_pred.shape))
-
-    # print the number of params
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Number of parameters in the model: {num_params}")
