@@ -6,6 +6,7 @@ train.py
 import os
 import sys
 import yaml
+import wandb
 import optuna
 import shutil
 import logging
@@ -16,15 +17,12 @@ from argparse import ArgumentParser
 from echo.src.base_objective import BaseObjective
 
 import torch
-# from torch.amp import GradScaler
-
 from torch.cuda.amp import GradScaler
-
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from credit.distributed import distributed_model_wrapper, setup, get_rank_info
 
 from credit.seed import seed_everything
-from credit.losses import load_loss
+from credit.loss import VariableTotalLoss2D
 
 from credit.scheduler import load_scheduler
 from credit.trainers import load_trainer
@@ -34,11 +32,7 @@ from credit.datasets.load_dataset_and_dataloader import load_dataset, load_datal
 from credit.metrics import LatWeightedMetrics
 from credit.pbs import launch_script, launch_script_mpi
 from credit.models import load_model
-from credit.models.checkpoint import (
-    FSDPOptimizerWrapper,
-    TorchFSDPCheckpointIO,
-    load_state_dict_error_handler,
-)
+from credit.models.checkpoint import FSDPOptimizerWrapper, TorchFSDPCheckpointIO
 
 
 warnings.filterwarnings("ignore")
@@ -49,8 +43,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 # https://stackoverflow.com/questions/59129812/how-to-avoid-cuda-out-of-memory-in-pytorch
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-# os.environ["NCCL_P2P_DISABLE"] = "1"
-# os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
 
 def load_model_states_and_optimizer(conf, model, device):
@@ -83,7 +75,7 @@ def load_model_states_and_optimizer(conf, model, device):
     #  Load an optimizer, gradient scaler, and learning rate scheduler, the optimizer must come after wrapping model using FSDP
     if not load_weights:  # Loaded after loading model weights when reloading
         optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
+            model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
             betas=(0.9, 0.95),
@@ -96,16 +88,16 @@ def load_model_states_and_optimizer(conf, model, device):
     # Multi-step training case -- when starting, only load the model weights (then after load all states)
     elif load_weights and not (load_optimizer_conf or load_scaler_conf or load_scheduler_conf):
         optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
+            model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
             betas=(0.9, 0.95),
         )
         # FSDP checkpoint settings
         if conf["trainer"]["mode"] == "fsdp":
-            logging.info(f"Loading FSDP model state only from {save_loc}")
+            logging.info(f"Loading FSDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
             optimizer = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
+                model.parameters(),
                 lr=learning_rate,
                 weight_decay=weight_decay,
                 betas=(0.9, 0.95),
@@ -118,20 +110,14 @@ def load_model_states_and_optimizer(conf, model, device):
             ckpt = os.path.join(save_loc, "checkpoint.pt")
             checkpoint = torch.load(ckpt, map_location=device)
             if conf["trainer"]["mode"] == "ddp":
-                logging.info(f"Loading DDP model state only from {save_loc}")
-                load_msg = model.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
-                load_state_dict_error_handler(load_msg)
+                logging.info(f"Loading DDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
+                model.module.load_state_dict(checkpoint["model_state_dict"])
             else:
-                logging.info(f"Loading model state only from {save_loc}")
-                load_msg = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-                load_state_dict_error_handler(load_msg)
-
+                logging.info(f"Loading model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
+                model.load_state_dict(checkpoint["model_state_dict"])
         # Load the learning rate scheduler and mixed precision grad scaler
         scheduler = load_scheduler(optimizer, conf)
         scaler = ShardedGradScaler(enabled=amp) if conf["trainer"]["mode"] == "fsdp" else GradScaler(enabled=amp)
-        # Update the config file to the current epoch based on the checkpoint
-        if "reload_epoch" in conf["trainer"] and conf["trainer"]["reload_epoch"] and os.path.exists(os.path.join(save_loc, "training_log.csv")):
-            conf["trainer"]["start_epoch"] = checkpoint["epoch"] + 1
 
     # load optimizer and grad scaler states
     else:
@@ -142,7 +128,7 @@ def load_model_states_and_optimizer(conf, model, device):
         if conf["trainer"]["mode"] == "fsdp":
             logging.info(f"Loading FSDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
             optimizer = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
+                model.parameters(),
                 lr=learning_rate,
                 weight_decay=weight_decay,
                 betas=(0.9, 0.95),
@@ -157,15 +143,12 @@ def load_model_states_and_optimizer(conf, model, device):
             # DDP settings
             if conf["trainer"]["mode"] == "ddp":
                 logging.info(f"Loading DDP model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
-                load_msg = model.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
-                load_state_dict_error_handler(load_msg)
+                model.module.load_state_dict(checkpoint["model_state_dict"])
             else:
                 logging.info(f"Loading model, optimizer, grad scaler, and learning rate scheduler states from {save_loc}")
-                load_msg = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-                load_state_dict_error_handler(load_msg)
-
+                model.load_state_dict(checkpoint["model_state_dict"])
             optimizer = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
+                model.parameters(),
                 lr=learning_rate,
                 weight_decay=weight_decay,
                 betas=(0.9, 0.95),
@@ -196,7 +179,7 @@ def load_model_states_and_optimizer(conf, model, device):
     return conf, model, optimizer, scheduler, scaler
 
 
-def main(rank, world_size, conf, backend=None, trial=False):
+def main(rank, world_size, conf, backend, trial=False):
     """
     Main function to set up training and validation processes.
 
@@ -221,6 +204,10 @@ def main(rank, world_size, conf, backend=None, trial=False):
     device = torch.device(f"cuda:{rank % torch.cuda.device_count()}") if torch.cuda.is_available() else torch.device("cpu")
     torch.cuda.set_device(rank % torch.cuda.device_count())
 
+    # Config settings
+    seed = conf["seed"]
+    seed_everything(seed)
+
     # Load the dataset using the provided dataset_type
     train_dataset = load_dataset(conf, rank=rank, world_size=world_size, is_train=True)
     valid_dataset = load_dataset(conf, rank=rank, world_size=world_size, is_train=False)
@@ -228,9 +215,6 @@ def main(rank, world_size, conf, backend=None, trial=False):
     # Load the dataloader
     train_loader = load_dataloader(conf, train_dataset, rank=rank, world_size=world_size, is_train=True)
     valid_loader = load_dataloader(conf, valid_dataset, rank=rank, world_size=world_size, is_train=False)
-
-    seed = conf["seed"] + rank
-    seed_everything(seed)
 
     # model
     m = load_model(conf)
@@ -243,17 +227,14 @@ def main(rank, world_size, conf, backend=None, trial=False):
         m = torch.compile(m)
 
     # Wrap in DDP or FSDP module, or none
-    if conf["trainer"]["mode"] in ["ddp", "fsdp"]:
-        model = distributed_model_wrapper(conf, m, device)
-    else:
-        model = m
+    model = distributed_model_wrapper(conf, m, device)
 
     # Load model weights (if any), an optimizer, scheduler, and gradient scaler
     conf, model, optimizer, scheduler, scaler = load_model_states_and_optimizer(conf, model, device)
 
     # Train and validation losses
-    train_criterion = load_loss(conf)
-    valid_criterion = load_loss(conf, validation=True)
+    train_criterion = VariableTotalLoss2D(conf)
+    valid_criterion = VariableTotalLoss2D(conf, validation=True)
 
     # Set up some metrics
     metrics = LatWeightedMetrics(conf)
@@ -314,6 +295,9 @@ class Objective(BaseObjective):
             Any: The result of the training process.
         """
 
+        conf["model"]["dim_head"] = conf["model"]["dim"]
+        conf["model"]["vq_codebook_dim"] = conf["model"]["dim"]
+
         try:
             return main(0, 1, conf, trial=trial)
 
@@ -329,8 +313,8 @@ class Objective(BaseObjective):
                 raise E
 
 
-def main_cli():
-    description = "Train an AI model for Numerical Weather Prediction (NWP) using a specified dataset and configuration."
+if __name__ == "__main__":
+    description = "Train a segmengation model on a hologram data set"
     parser = ArgumentParser(description=description)
     parser.add_argument(
         "-c",
@@ -367,6 +351,7 @@ def main_cli():
     config = args_dict.pop("model_config")
     launch = int(args_dict.pop("launch"))
     backend = args_dict.pop("backend")
+    use_wandb = int(args_dict.pop("wandb"))
 
     # Set up logger to print stuff
     root = logging.getLogger()
@@ -375,16 +360,9 @@ def main_cli():
 
     # Stream output to stdout
     ch = logging.StreamHandler()
-    # see if we are in debug mode to set logging level
-    gettrace = getattr(sys, "gettrace", None)
-    debug = gettrace()
-    if debug:
-        ch.setLevel(logging.DEBUG)
-    else:
-        ch.setLevel(logging.INFO)
+    ch.setLevel(logging.INFO)
     ch.setFormatter(formatter)
     root.addHandler(ch)
-    logging.debug("logging set to DEBUG level")
 
     # Load the configuration and get the relevant variables
     with open(config) as cf:
@@ -415,9 +393,17 @@ def main_cli():
             launch_script_mpi(config, script_path)
         sys.exit()
 
+    if use_wandb:  # this needs updated
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project="Derecho parallelism",
+            name=f"Worker {os.environ['RANK']} {os.environ['WORLD_SIZE']}",
+            # track hyperparameters and run metadata
+            config=conf,
+        )
+
+    seed = conf["seed"]
+    seed_everything(seed)
+
     local_rank, world_rank, world_size = get_rank_info(conf["trainer"]["mode"])
     main(world_rank, world_size, conf, backend)
-
-
-if __name__ == "__main__":
-    main_cli()
